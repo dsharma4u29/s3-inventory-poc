@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  S3 Inventory Job POC. Object Lock bucket with 1-year COMPLIANCE
+  retention, an inventory table, and a checkpoint table.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique bucket name.
+  RetentionMode:
+    Type: String
+    Default: GOVERNANCE
+    AllowedValues: [GOVERNANCE, COMPLIANCE]
+    Description: GOVERNANCE is bypassable with s3:BypassGovernanceRetention. Use it for the POC.
+  RetentionYears:
+    Type: Number
+    Default: 1
+  InventoryTableName:
+    Type: String
+    Default: S3ObjectInventory
+  CheckpointTableName:
+    Type: String
+    Default: S3InventoryCheckpoint
+  BillingMode:
+    Type: String
+    Default: PAY_PER_REQUEST
+    AllowedValues: [PAY_PER_REQUEST, PROVISIONED]
+
+Conditions:
+  IsProvisioned: !Equals [!Ref BillingMode, PROVISIONED]
+
+Resources:
+
+  InventoryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      # Object Lock requires versioning and can only be enabled at creation.
+      ObjectLockEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: !Ref RetentionMode
+            Years: !Ref RetentionYears
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # pk = "B#<bucket>#K#<key>", sk = versionId | "null"
+  InventoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref InventoryTableName
+      BillingMode: !Ref BillingMode
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      ProvisionedThroughput: !If
+        - IsProvisioned
+        - ReadCapacityUnits: 100
+          WriteCapacityUnits: 4000
+        - !Ref AWS::NoValue
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # pk = jobId, sk = shardId. One row per shard; tiny table, hot writes.
+  CheckpointTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref CheckpointTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+        - AttributeName: shardId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+        - AttributeName: shardId
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  JobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: inventory-job
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                Resource: !GetAtt InventoryBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetObjectRetention
+                  - s3:GetObjectLegalHold
+                  - s3:PutObject
+                Resource: !Sub '${InventoryBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt InventoryTable.Arn
+                  - !GetAtt CheckpointTable.Arn
+
+Outputs:
+  BucketName:
+    Value: !Ref InventoryBucket
+  InventoryTable:
+    Value: !Ref InventoryTable
+  CheckpointTable:
+    Value: !Ref CheckpointTable
+  JobRoleArn:
+    Value: !GetAtt JobRole.Arn

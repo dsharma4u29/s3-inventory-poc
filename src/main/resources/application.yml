@@ -1,0 +1,42 @@
+spring:
+  main:
+    banner-mode: off
+  application:
+    name: s3-inventory-poc
+
+logging:
+  level:
+    com.publicissapient.s3inventory: INFO
+    software.amazon.awssdk: WARN
+
+inventory:
+  bucket: \${S3_INVENTORY_BUCKET:s3-inventory-poc-locked}
+  job-id: poc-run
+  region: \${AWS_REGION:us-east-1}
+
+  tables:
+    inventory: S3ObjectInventory
+    checkpoint: S3InventoryCheckpoint
+
+  page-size: 1000
+  shards: []
+
+  head-mode: ON_DEMAND
+  head-concurrency: 64
+  head-required-fields:
+    - CONTENT_TYPE
+    - OBJECT_LOCK
+
+  batch-size: 25
+  write-concurrency: 8
+
+  failure:
+    enabled: false
+    crash-after-pages: 0
+    crash-phase: AFTER_INVENTORY_BEFORE_CHECKPOINT
+
+  seed:
+    enabled: false
+    object-count: 1000
+    object-size-bytes: 1024
+    key-prefix: sample/
